@@ -1,159 +1,266 @@
+
 /*
-	easyDialog.inc - Dialogs made easier!
+	Dialog Response — RaP-SoR open.mp packaging
 
-	With this useful include, scripters can easily create
-	dialogs and show them to players.
+	Based on https://github.com/devbluen/easyDialog (1.0.4)
+	Original idea: Awsomedude / Emmet_
 
-	This include will prevent dialog spoofing, ID collision
-	and a lot more.
-
-	Created by Emmet on Friday, January 24, 2014.
-	Updated by Southclaws 2017-10-13 to add include guard.
-	Updated by MichelDev 2023-02-24 new style and fix error HidePlayerDialog (open-mp RC2)
-	Updated by adib-yg 2023-11-15 to add the DIALOG_STYLE tag.
+	API:
+	- Dialog_Create(playerid, const callback[], DIALOG_STYLE:style, const title[], body[], const button1[], const button2[], {Float, _}:...);
+	- Dialog_Show(playerid, const callback[], DIALOG_STYLE:style, const title[], body[], const button1[], const button2[], {Float, _}:...);
+	- Dialog_Close(playerid);
+	- Dialog_ReShow(playerid, const error[] = "");
+	- bool:Dialog_Created(playerid);
 */
+
 
 #if defined _easyDialog_included
 	#endinput
 #endif
 #define _easyDialog_included
 
+			// Macros
+#define Dialog:%0(%1) \
+	forward edialog%0(%1); \
+	public edialog%0(%1)
+
+#define Dialog_Show(%0,%1, \
+	Dialog_Create(%0, #%1,
+
 #if !defined isnull
 	#define isnull(%1) \
 		((!(%1[0])) || (((%1[0]) == '\1') && (!(%1[1]))))
 #endif
 
-#if !defined HidePlayerDialog
-	#define HidePlayerDialog(%1) \
-		ShowPlayerDialog(%1, -1, 0, " ", " ", " ", " ")
-#endif
+			// Includes
+#include <YSI_Coding\y_hooks>
+#include <YSI_Coding\y_va>
 
-#define Dialog:%0(%1) \
-	forward dialog_%0(%1); public dialog_%0(%1)
-
-#define Dialog_Show(%0,%1, \
-	Dialog_Open(%0, #%1,
-
-#define Dialog_Opened(%0) \
-	(CallRemoteFunction("Dialog_IsOpened", "i", (%0)))
-
-#if !defined _INC_open_mp
-	#if !defined DIALOG_STYLE
-		#define DIALOG_STYLE: _:
-	#endif
-#endif
+static enum E_DIALOG {
+	bool:E_DIALOG_CREATED,
+	E_DIALOG_BODY[4096],
+	E_DIALOG_TITLE[64],
+	E_DIALOG_BUTTON1[12],
+	E_DIALOG_BUTTON2[12],
+	E_DIALOG_CALLBACK[32],
+	E_DIALOG_BODY_ERROR[192],
+	DIALOG_STYLE:E_DIALOG_STYLE,
+	
+	// Data Protections
+	E_DIALOG_LISTS
+};
 
 static
-	s_DialogName[MAX_PLAYERS][32 char],
-	bool: s_DialogOpened[MAX_PLAYERS]
+	e_Dialog[MAX_PLAYERS][E_DIALOG]
 ;
 
-forward OnDialogPerformed(playerid, const dialog[], response, success);
+static const
+	DIALOG_PROTECTED_ID = 32762
+;
 
-forward @dialog_format(); @dialog_format() {
-	new emptyString[] = '\1';
-	format(emptyString, sizeof(emptyString), emptyString);
+// open.mp / modern pawncc: tagged returns must be known before first use
+forward bool:Dialog_Created(playerid);
+forward DIALOG_STYLE:Dialog_GetStyle(playerid);
+
+hook OnPlayerDisconnect(playerid, reason) {
+
+	Dialog_Reset(playerid);
+	return Y_HOOKS_CONTINUE_RETURN_1;
 }
 
-forward Dialog_IsOpened(playerid);
-public Dialog_IsOpened(playerid) {
-	return (s_DialogOpened[playerid]);
+hook OnDialogResponse(playerid, dialogid, response, listitem, inputtext[]) {
+
+	if(dialogid != DIALOG_PROTECTED_ID)
+		return Y_HOOKS_CONTINUE_RETURN_1;
+
+	if(!Dialog_Created(playerid))
+    	return Y_HOOKS_BREAK_RETURN_1;
+
+	// Mod Current Dialog
+	new callback[32];
+	Dialog_GetCallback(playerid, callback);
+	Dialog_SetCreated(playerid, false);			// Close Status Dialog
+	Dialog_SetError(playerid, "");				// Invalid Error
+
+	// Character Crash Server (protection)
+	for(new i = 0, l = strlen(inputtext); i < l; i++) 
+		if(inputtext[i] == '%') 
+			inputtext[i] = '#';
+	
+	// Listitem Response Protection
+	new max_listitem;
+	if((max_listitem = Dialog_GetLists(playerid)) > 0) {
+		if(listitem != -1 && listitem >= max_listitem) listitem = (max_listitem - 1);	// normalize listitem response
+		if(listitem < 0 && response) listitem = 0;
+	}
+
+	// Response Dialog
+	CallLocalFunction(
+		va_return(
+			"edialog%s", 
+			callback
+		), 
+		"iiis", 
+		playerid, response, listitem, isnull(inputtext) ? "\1" : inputtext
+	);
+    return Y_HOOKS_BREAK_RETURN_1;
+}
+
+stock Dialog_Create(playerid, const callback[], DIALOG_STYLE:style, const title[], const body[], const button1[], const button2[], {Float, _}:...) {
+
+	new 
+		dlg_error[192],
+		bodyBuff[4096]
+	;
+
+	format(bodyBuff, sizeof bodyBuff, body, ___(7));
+
+	// Protections
+	switch(style) {
+		case 
+			DIALOG_STYLE_LIST,
+			DIALOG_STYLE_TABLIST, 
+			DIALOG_STYLE_TABLIST_HEADERS:
+			{
+				new len = strlen(bodyBuff);
+				while(len > 0 && (bodyBuff[len - 1] == '\n' || bodyBuff[len - 1] == '\r'))
+					bodyBuff[--len] = EOS;
+
+				new items = (len == 0) ? 0 : (Dialog_CountChars(bodyBuff, "\n") + 1);
+				if(style == DIALOG_STYLE_TABLIST_HEADERS && items > 0)
+					items--;
+
+				Dialog_SetLists(playerid, items);
+			}
+	}
+
+	Dialog_SetBody(playerid, bodyBuff);
+	Dialog_SetTitle(playerid, title);
+	Dialog_SetStyle(playerid, style);
+	Dialog_SetCallback(playerid, callback);
+	Dialog_SetButton1(playerid, button1);
+	Dialog_SetButton2(playerid, button2);
+	Dialog_SetCreated(playerid, true);
+
+	Dialog_GetError(playerid, dlg_error);
+	if(!isnull(dlg_error))
+		strcat(bodyBuff, dlg_error);
+
+	return ShowPlayerDialog(playerid, DIALOG_PROTECTED_ID, style, title, bodyBuff, button1, button2);
+}
+
+stock Dialog_ReShow(playerid, const error[] = "", {Float, _}:...) {
+
+	new
+		body[4096],
+		title[64],
+		button1[12],
+		button2[12],
+		DIALOG_STYLE:style,
+		callback[32],
+		errorBuff[192]
+	;
+
+	format(errorBuff, sizeof errorBuff, error, ___(2));
+	strins(errorBuff, "\n\n", 0);
+
+	// Get
+	style = Dialog_GetStyle(playerid);
+	Dialog_GetTitle(playerid, title);
+	Dialog_GetBody(playerid, body);
+	Dialog_GetButton1(playerid, button1);
+	Dialog_GetButton2(playerid, button2);
+	Dialog_GetCallback(playerid, callback);
+
+	// Set
+	Dialog_SetError(playerid, errorBuff);
+
+	return 
+		Dialog_Create(
+			.playerid = playerid, 
+			.callback = callback, 
+			.style = style, 
+			.title = title, 
+			.body = body, 
+			.button1 = button1, 
+			.button2 = button2
+		)
+	;
 }
 
 stock Dialog_Close(playerid) {
-	s_DialogName[playerid]{0} = 0;
-	s_DialogOpened[playerid] = false;
-
-	return HidePlayerDialog(playerid);
+	Dialog_Reset(playerid);
+	ShowPlayerDialog(playerid, DIALOG_PROTECTED_ID - 1, DIALOG_STYLE_MSGBOX, " ", " ", " ", "");
 }
 
-stock Dialog_Open(playerid, const function[], DIALOG_STYLE:style, const caption[], const info[], const button1[], const button2[], {Float,_}:...) {
-	static
-		string[4096],
-		args
-	;
+static stock Dialog_GetTitle(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_TITLE], maxlength);
 
-	if (!strlen(info)) {
-		return 0;
-	}
-	if ((args = numargs()) > 7) {
-		while (--args >= 7) {
-			#emit LCTRL 5
-			#emit LOAD.alt args
-			#emit SHL.C.alt 2
-			#emit ADD.C 12
-			#emit ADD
-			#emit LOAD.I
-			#emit PUSH.pri
-		}
-		#emit PUSH.S info
-		#emit PUSH.C 4096
-		#emit PUSH.C string
+static stock Dialog_SetTitle(playerid, const title[])
+	strcopy(e_Dialog[playerid][E_DIALOG_TITLE], title);
 
-		#emit LOAD.S.pri 8
-		#emit CONST.alt 16
-		#emit SUB
-		#emit PUSH.pri
+static stock Dialog_GetBody(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_BODY], maxlength);
 
-		#emit SYSREQ.C format
-		#emit LCTRL 5
-		#emit SCTRL 4
+static stock Dialog_SetBody(playerid, const body[])
+	strcopy(e_Dialog[playerid][E_DIALOG_BODY], body);
 
-		ShowPlayerDialog(playerid, 32700, style, caption, string, button1, button2);
-	}
-	else {
-		ShowPlayerDialog(playerid, 32700, style, caption, info, button1, button2);
-	}
-	s_DialogOpened[playerid] = true;
+static stock Dialog_GetButton1(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_BUTTON1], maxlength);
 
-	strpack(s_DialogName[playerid], function, 32 char);
+static stock Dialog_SetButton1(playerid, const text[])
+	strcopy(e_Dialog[playerid][E_DIALOG_BUTTON1], text);
 
-	return 1;
-}
+static stock Dialog_GetButton2(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_BUTTON2], maxlength);
 
-public OnDialogResponse(playerid, dialogid, response, listitem, inputtext[]) {
-	static
-		s_Public = cellmax;
+static stock Dialog_SetButton2(playerid, const text[])
+	strcopy(e_Dialog[playerid][E_DIALOG_BUTTON2], text);
 
-	if (s_Public == cellmax) {
-		s_Public = funcidx("OnDialogPerformed");
-	}
+static stock Dialog_GetCallback(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_CALLBACK], maxlength);
 
-	// Sanitize inputs.
-	for (new i = 0, l = strlen(inputtext); i < l; i ++) {
-		if (inputtext[i] == '%') {
-			inputtext[i] = '#';
-		}
-	}
+static stock Dialog_SetCallback(playerid, const callback[])
+	strcopy(e_Dialog[playerid][E_DIALOG_CALLBACK], callback);
+
+static stock Dialog_GetError(playerid, dest[], maxlength = sizeof dest)
+	strcopy(dest, e_Dialog[playerid][E_DIALOG_BODY_ERROR], maxlength);
+
+static stock Dialog_SetError(playerid, const text[])
+	strcopy(e_Dialog[playerid][E_DIALOG_BODY_ERROR], text);
+
+static stock DIALOG_STYLE:Dialog_GetStyle(playerid)
+	return e_Dialog[playerid][E_DIALOG_STYLE];
+
+static stock Dialog_SetStyle(playerid, DIALOG_STYLE:style)
+	e_Dialog[playerid][E_DIALOG_STYLE] = style;
+
+static stock Dialog_GetLists(playerid)
+	return e_Dialog[playerid][E_DIALOG_LISTS];
+
+static stock Dialog_SetLists(playerid, value)
+	e_Dialog[playerid][E_DIALOG_LISTS] = value;
+
+stock bool:Dialog_Created(playerid)
+	return e_Dialog[playerid][E_DIALOG_CREATED];
+
+static stock Dialog_SetCreated(playerid, bool:created_status)
+	e_Dialog[playerid][E_DIALOG_CREATED] = created_status;
+
+static stock Dialog_CountChars(const haystack[], const sub[], bool:ignorecase = false, bool:count_overlapped = false) {
+	new
+		increment = count_overlapped ? 1 : strlen(sub),
+		pos = -increment,
+		count = 0;
 	
-	if (dialogid == 32700 && strlen(s_DialogName[playerid]) > 0) {
-		new
-			string[40];
-
-		strcat(string, "dialog_");
-		strcat(string, s_DialogName[playerid]);
-
-		Dialog_Close(playerid);
-
-		if ((s_Public == -1) || (CallLocalFunction("OnDialogPerformed", "dsdd", playerid, string[7], response, funcidx(string) != -1))) {
-	 		CallLocalFunction(string, "ddds", playerid, response, listitem, (!inputtext[0]) ? ("\1") : (inputtext));
-		}
-	}
-	#if defined DR_OnDialogResponse
-		return DR_OnDialogResponse(playerid, dialogid, response, listitem, inputtext);
-	#else
-		return 0;
-	#endif
+	while (-1 != (pos = strfind(haystack, sub, ignorecase, pos + increment)))
+		count++;
+	
+	return count;
 }
 
-#if defined _ALS_OnDialogResponse
-	#undef OnDialogResponse
-#else
-	#define _ALS_OnDialogResponse
-#endif
+static stock Dialog_Reset(playerid) {
 
-#define OnDialogResponse DR_OnDialogResponse
-
-#if defined DR_OnDialogResponse
-	forward DR_OnDialogResponse(playerid, dialogid, response, listitem, inputtext[]);
-#endif
+	static const e_Clear[E_DIALOG];
+	e_Dialog[playerid] = e_Clear;
+}
